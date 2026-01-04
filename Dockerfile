@@ -1,28 +1,53 @@
-FROM --platform=linux/amd64 pytorch/pytorch
+# =========================
+# Base image
+# =========================
+FROM python:3.10-slim
 
-ENV PYTHONUNBUFFERED=1
+# =========================
+# System dependencies
+# =========================
+RUN apt-get update && apt-get install -y \
+    git \
+    git-lfs \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN groupadd -r user && useradd -m --no-log-init -r -g user user
-USER user
+# =========================
+# Set workdir
+# =========================
+WORKDIR /app
 
-WORKDIR /opt/app
+# =========================
+# Copy repository content
+# （必须在 git lfs pull 之前）
+# =========================
+COPY . /app
 
-# 安装必要的库
-RUN python -m pip install \
-    --user \
-    --no-cache-dir \
-    numpy \
-    scipy \
-    simpleitk
+# =========================
+# Initialize and pull Git LFS files
+# ★ 这是你之前缺失的致命步骤 ★
+# =========================
+RUN git lfs install && git lfs pull
 
-# 1. 复制训练代码 (因为 model.py 引用了它)
-COPY --chown=user:user trackrad_unet_v2.py /opt/app/
+# =========================
+# Python dependencies
+# =========================
+RUN pip install --no-cache-dir -r requirements.txt
 
-# 2. 复制推理代码
-COPY --chown=user:user inference.py /opt/app/
-COPY --chown=user:user model.py /opt/app/
+# =========================
+# Safety check (强烈建议保留)
+# 如果权重没拉下来，这里直接失败
+# =========================
+RUN python - << 'EOF'
+import os
+p = "resources/best_model.pth"
+assert os.path.exists(p), "❌ best_model.pth not found"
+size = os.path.getsize(p)
+print("✔ best_model.pth size:", size)
+assert size > 100_000_000, "❌ best_model.pth is too small (LFS not pulled)"
+EOF
 
-# 3. 复制权重资源
-COPY --chown=user:user resources /opt/app/resources
-
-ENTRYPOINT ["python", "inference.py"]
+# =========================
+# Default command (TrackRAD)
+# =========================
+CMD ["python", "inference.py"]
