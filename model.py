@@ -13,15 +13,19 @@ RESOURCE_PATH = Path("resources")
 WEIGHTS_PATH = RESOURCE_PATH / "best_model.pth"
 
 # ===============================
-# Model definition (MUST match training)
+# Model definition
 # ===============================
-from trackrad_unet_v2 import UNetV2  # ⚠️ 确保该文件也被打包进提交
-
+# 依赖 Dockerfile 中的 COPY trackrad_unet_v2.py ...
+try:
+    from trackrad_unet_v2 import UNetV2
+except ImportError:
+    raise ImportError("CRITICAL: trackrad_unet_v2.py not found. Check your Dockerfile COPY instructions.")
 
 # ===============================
 # Utility functions
 # ===============================
 def normalize_frame(frame: np.ndarray) -> np.ndarray:
+    """与训练代码完全一致的百分位归一化"""
     frame = frame.astype(np.float32)
     non_zero = frame[frame > 0]
     if len(non_zero) > 100:
@@ -34,6 +38,7 @@ def normalize_frame(frame: np.ndarray) -> np.ndarray:
 
 
 def post_process(pred: np.ndarray, prev_mask: np.ndarray) -> np.ndarray:
+    """与训练代码一致的后处理"""
     if pred.sum() == 0:
         return prev_mask.copy()
 
@@ -59,40 +64,48 @@ def run_algorithm(
 ) -> np.ndarray:
     """
     Args:
-        frames: (T, H, W)
-        target: (H, W) or (H, W, 1)
-    Returns:
-        masks: (T, H, W), uint8
+        frames: (W, H, T) from Official Inference
+        target: (W, H, 1) from Official Inference
     """
+    # [CRITICAL FIX 1] 维度对齐
+    # 官方输入是 (W, H, T)，我们需要 (T, H, W) 进行处理
+    frames = frames.transpose(2, 1, 0)
+    target = target.transpose(2, 1, 0)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # -------------------------------
-    # Prepare target
-    # -------------------------------
+    # 处理 target 维度，确保它是 (H, W)
     if target.ndim == 3:
-        target = target[..., 0]
+        target = target[0] 
+    
     target = (target > 0).astype(np.uint8)
 
+    # 现在 shape 是正确的 (Time, Height, Width)
     T, H, W = frames.shape
     image_size = 256
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # -------------------------------
     # Load model
     # -------------------------------
+    # base_ch=64 必须与训练配置一致
     model = UNetV2(in_channels=4, out_channels=1, base_ch=64)
+    
+    if not WEIGHTS_PATH.exists():
+        raise FileNotFoundError(f"Weights not found at {WEIGHTS_PATH}")
+        
     model.load_state_dict(torch.load(WEIGHTS_PATH, map_location=device))
     model.to(device)
     model.eval()
 
     # -------------------------------
-    # Preprocess frames
+    # Preprocess frames (Vectorized)
     # -------------------------------
+    # 逐帧归一化
     frames_norm = np.stack([normalize_frame(f) for f in frames])
 
     scale_h = image_size / H
     scale_w = image_size / W
 
+    # Resize 到 256x256 (order=1 match training)
     frames_resized = np.stack([
         zoom(frames_norm[t], (scale_h, scale_w), order=1)
         for t in range(T)
@@ -110,6 +123,7 @@ def run_algorithm(
     prev_mask = preds_resized[0]
 
     for t in range(1, T):
+        # 构造输入: [Current, Prev_Frame, First_Mask, Prev_Mask]
         inp = np.stack([
             frames_resized[t],
             prev_frame,
@@ -124,6 +138,8 @@ def run_algorithm(
             prob = torch.sigmoid(out)[0, 0].cpu().numpy()
 
         pred = (prob > 0.5).astype(np.uint8)
+        
+        # 后处理
         pred = post_process(pred, prev_mask)
 
         preds_resized[t] = pred
@@ -131,11 +147,15 @@ def run_algorithm(
         prev_mask = pred
 
     # -------------------------------
-    # Resize back to original size
+    # Resize back
     # -------------------------------
     preds = np.stack([
         zoom(preds_resized[t], (H / image_size, W / image_size), order=0)
         for t in range(T)
     ])
+    
+    # [CRITICAL FIX 2] 维度还原
+    # (T, H, W) -> (W, H, T) 以符合官方输出要求
+    preds = preds.transpose(2, 1, 0)
 
     return preds.astype(np.uint8)

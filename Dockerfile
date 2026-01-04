@@ -1,17 +1,13 @@
 FROM --platform=linux/amd64 pytorch/pytorch
 
-# 确保 Python 输出不被缓存
 ENV PYTHONUNBUFFERED=1
 
-# 创建非 root 用户 (Grand Challenge 推荐)
 RUN groupadd -r user && useradd -m --no-log-init -r -g user user
 USER user
 
 WORKDIR /opt/app
 
-# --- 修改点：直接在这里安装依赖，防止 requirements.txt 漏写 ---
-# scipy: 用于 model.py 的图像缩放和连通域分析
-# simpleitk: 用于 inference.py 读取 .mha 文件
+# 安装必要的库
 RUN python -m pip install \
     --user \
     --no-cache-dir \
@@ -19,11 +15,14 @@ RUN python -m pip install \
     scipy \
     simpleitk
 
-# 复制资源文件夹 (确保 best_model.pth 在里面)
-COPY --chown=user:user resources /opt/app/resources
+# 1. 复制训练代码 (因为 model.py 引用了它)
+COPY --chown=user:user trackrad_unet_v2.py /opt/app/
 
-# 复制核心代码
+# 2. 复制推理代码
 COPY --chown=user:user inference.py /opt/app/
 COPY --chown=user:user model.py /opt/app/
+
+# 3. 复制权重资源
+COPY --chown=user:user resources /opt/app/resources
 
 ENTRYPOINT ["python", "inference.py"]
