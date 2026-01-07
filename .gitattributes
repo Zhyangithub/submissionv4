@@ -1,2 +1,0 @@
-resources/*.pth filter=lfs diff=lfs merge=lfs -text
-resources/best_model.pth filter=lfs diff=lfs merge=lfs -text
